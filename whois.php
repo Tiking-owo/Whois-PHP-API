@@ -1,4 +1,12 @@
 <?php
+/**
+ * WHOIS-PHP 查询 API
+ * * @author 皪澄_Tiking (GitHub: Tiking-owo)
+ * @license MIT License
+ * @copyright (c) 2026 Tiking-owo
+ * * Full license text is available in the LICENSE file in the root directory.
+ */
+
 // 关闭 HTML 错误提示，只输出纯 JSON
 ini_set('display_errors', 0); 
 error_reporting(E_ALL);
