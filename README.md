@@ -6,7 +6,8 @@
 ## 版本信息
 - **当前版本**：v1.0.0 稳定版
 ## 接口基本信息
-接口文档：[https://whois.tiking.top/docs](https://whois.tiking.top/docs)
+#### 前端示例：[https://whois.tiking.top/](https://whois.tiking.top/)
+#### 接口文档：[https://whois.tiking.top/docs](https://whois.tiking.top/docs)
 ```
 请求方式：GET
 返回格式：application/json
