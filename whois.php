@@ -1,10 +1,12 @@
 <?php
 /**
  * WHOIS-PHP 查询 API
- * * @author 皪澄_Tiking (GitHub: Tiking-owo)
+ *
+ * @author 皪澄_Tiking (GitHub: Tiking-owo)
  * @license MIT License
  * @copyright (c) 2026 Tiking-owo
- * * Full license text is available in the LICENSE file in the root directory.
+ *
+ * Full license text is available in the LICENSE file in the root directory.
  */
 
 // 关闭 HTML 错误提示，只输出纯 JSON
@@ -12,12 +14,10 @@ ini_set('display_errors', 0);
 error_reporting(E_ALL);
 
 // ==================[ CORS 跨域配置 ]==================
-// 允许所有域名异步访问（解决前端 Ajax/Fetch 跨域报错）
 header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Methods: GET, POST, OPTIONS");
 header("Access-Control-Allow-Headers: Content-Type, Authorization, X-Requested-With");
 
-// 处理浏览器的 OPTIONS 预检请求，直接返回 200 并退出
 if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
     header("HTTP/1.1 200 OK");
     exit;
@@ -26,31 +26,68 @@ if ($_SERVER['REQUEST_METHOD'] == 'OPTIONS') {
 
 header('Content-Type: application/json; charset=utf-8');
 
+// ==================[ 核心配置：缓存与速率限制 ]==================
+define('CACHE_DIR', sys_get_temp_dir() . '/whois_cache/'); // 缓存目录
+define('LIMIT_DIR', sys_get_temp_dir() . '/whois_limit/'); // 限流目录
+define('CACHE_TIME', 300);                                 // 缓存时间 (秒)
+define('LIMIT_TIME', 2);                                   // 访问频率限制 (秒)
+
+// 自动初始化必要的本地存储目录
+if (!is_dir(CACHE_DIR)) @mkdir(CACHE_DIR, 0755, true);
+if (!is_dir(LIMIT_DIR)) @mkdir(LIMIT_DIR, 0755, true);
+
+// 获取客户端精准 IP
+function get_client_ip() {
+    $ip = '127.0.0.1';
+    if (!empty($_SERVER['HTTP_CLIENT_IP'])) {
+        $ip = $_SERVER['HTTP_CLIENT_IP'];
+    } elseif (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+        $ip = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0];
+    } elseif (!empty($_SERVER['REMOTE_ADDR'])) {
+        $ip = $_SERVER['REMOTE_ADDR'];
+    }
+    return trim($ip);
+}
+
+// 实施 Rate Limit 速率限制
+$client_ip = get_client_ip();
+$ip_hash = md5($client_ip);
+$limit_file = LIMIT_DIR . $ip_hash;
+$now_time = time();
+
+if (file_exists($limit_file)) {
+    $last_time = intval(@file_get_contents($limit_file));
+    if (($now_time - $last_time) < LIMIT_TIME) {
+        http_response_code(429); // 返回 429 状态码
+        echo json_encode([
+            'status' => 0,
+            'error' => 'Too many requests. Please query again after ' . LIMIT_TIME . ' seconds.'
+        ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        exit;
+    }
+}
+@file_put_contents($limit_file, $now_time); // 更新当前 IP 的最后访问时间
+// ===============================================================
+
 // 2. 获取并净化参数
 $domain = isset($_GET['domain']) ? trim($_GET['domain']) : '';
 $show_raw = isset($_GET['raw']) ? intval($_GET['raw']) : 0;
 
-// data.error
+// 参数为空时的智能分流拦截
 if (empty($domain)) {
-    // 获取浏览器的 Accept 请求头
     $accept = isset($_SERVER['HTTP_ACCEPT']) ? $_SERVER['HTTP_ACCEPT'] : '';
-
-    // 请求头里包含 application/json，API 接口，返回 JSON
     if (strpos($accept, 'application/json') !== false) {
-        header('Content-Type: application/json; charset=utf-8');
         echo json_encode([
             'status' => 0,
             'error' => 'Domain parameter is required.'
         ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
         exit;
     } 
-    
-    // 302 重定向到文档页
     header("Location: https://whois.tiking.top/docs", true, 302);
     exit;
 }
 
-// 解析域名信息
+// 3. 解析域名与格式校验
 $domain = strtolower($domain);
 $parts = explode('.', $domain);
 if (count($parts) < 2) {
@@ -60,12 +97,26 @@ if (count($parts) < 2) {
     ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
     exit;
 }
-$suffix = end($parts); // 获取域名后缀
+$suffix = end($parts); 
 
-// 获取 WHOIS 服务器地址
+// ==================[ 核心配置：读取本地数据缓存 ]==================
+$domain_hash = md5($domain);
+$cache_file = CACHE_DIR . $domain_hash;
+
+if (file_exists($cache_file) && ($now_time - filemtime($cache_file)) < CACHE_TIME) {
+    $cached_data = @file_get_contents($cache_file);
+    if ($cached_data) {
+        // 直接输出缓存的 JSON 字符串
+        echo $cached_data;
+        exit;
+    }
+}
+// ===============================================================
+
+// 4. 获取 WHOIS 服务器地址
 $whois_server = get_whois_server($suffix);
 
-// 发送 Socket 请求获取原始数据
+// 5. 发送 Socket 请求获取原始数据
 $raw_data = query_whois_socket($whois_server, $domain);
 
 if (!$raw_data || strpos($raw_data, 'Error:') === 0) {
@@ -76,40 +127,36 @@ if (!$raw_data || strpos($raw_data, 'Error:') === 0) {
     exit;
 }
 
-// 解析原始数据
+// 6. 解析原始数据
 $parsed_info = parse_whois_text($raw_data, $suffix);
 
-// 计算及组合最终响应字典
-$now = new DateTime();
-$query_time = $now->format('Y-m-d H:i:s');
-
+// 7. 计算生命周期与状态判定
 $creation_days = 0;
 $valid_days = 0;
 $is_expire = 0;
-$is_available = 1; // 默认可注册
+$is_available = 1; 
+
+$current_date = new DateTime();
 
 if (!empty($parsed_info['creation_time']) && !empty($parsed_info['expiration_time'])) {
-    $is_available = 0; // 查到了创建和到期时间，说明已被注册
-    
+    $is_available = 0; 
     try {
         $create_date = new DateTime($parsed_info['creation_time']);
         $expire_date = new DateTime($parsed_info['expiration_time']);
         
-        // 计算天数
-        $creation_days = $create_date->diff($now)->days;
+        $creation_days = $create_date->diff($current_date)->days;
         
-        if ($now > $expire_date) {
+        if ($current_date > $expire_date) {
             $is_expire = 1;
             $valid_days = 0; 
         } else {
             $is_expire = 0;
-            $valid_days = $now->diff($expire_date)->days;
+            $valid_days = $current_date->diff($expire_date)->days;
         }
     } catch (Exception $e) {
         // 时间解析异常兜底
     }
 } else {
-    // 额外未注册关键词判断
     if (preg_implode_check(['no match', 'not found', 'free', 'available', 'no entries found', 'No match for'], $raw_data)) {
         $is_available = 1;
     } else {
@@ -117,14 +164,14 @@ if (!empty($parsed_info['creation_time']) && !empty($parsed_info['expiration_tim
     }
 }
 
-// ==================返回JSON格式==================
+// ==================[ 构件标准嵌套 JSON 响应体 ]==================
 $response = [
     'status' => 1,
     'data'   => [
         'domain'        => $domain,
         'domain_suffix' => $suffix,
         'is_available'  => $is_available,
-        'raw'           => $raw_data, // 前端 displayResults 直接读取了 data.raw
+        'raw'           => $raw_data,
         'info'          => [
             'registrar_name'   => $parsed_info['registrar_name'],
             'registrant_name'  => $parsed_info['registrant_name'],
@@ -141,10 +188,12 @@ $response = [
     ]
 ];
 
+$output_json = json_encode($response, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
 
-if ($show_raw !== 1) { unset($response['data']['raw']); }
+// 将成功获取的纯数据写入本地高速缓存文件
+@file_put_contents($cache_file, $output_json);
 
-echo json_encode($response, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+echo $output_json;
 exit;
 
 
@@ -170,7 +219,6 @@ function get_whois_server($suffix) {
         return $common_servers[$suffix];
     }
     
-    // 如果不在预设内，直接通过 IANA 43端口查询该后缀官方去向
     $iana_raw = query_whois_socket('whois.iana.org', $suffix);
     if ($iana_raw && preg_match('/whois:\s+([^\s]+)/i', $iana_raw, $matches)) {
         return trim($matches[1]);
@@ -189,7 +237,7 @@ function query_whois_socket($server, $query) {
     }
     
     if ($server === 'whois.verisign-grs.com') {
-        $query = "=" . $query; // 针对 .com 实施精准无混淆查询
+        $query = "=" . $query; 
     }
     
     fwrite($fp, $query . "\r\n");
@@ -201,9 +249,6 @@ function query_whois_socket($server, $query) {
     return $out;
 }
 
-/**
- * 单行正则安全匹配（提取第一个捕获组 [1] 并作防越界处理）
- */
 function match_field($patterns, $text) {
     foreach ($patterns as $pattern) {
         if (preg_match($pattern, $text, $matches)) {
@@ -215,9 +260,6 @@ function match_field($patterns, $text) {
     return "";
 }
 
-/**
- * 多行正则安全匹配（提取 DNS 等多行重名数据，彻底修复 null 导致的 Fatal Error）
- */
 function match_field_multi($patterns, $text) {
     foreach ($patterns as $pattern) {
         if (preg_match_all($pattern, $text, $matches)) {
@@ -229,9 +271,6 @@ function match_field_multi($patterns, $text) {
     return [];
 }
 
-/**
- * 辅助函数：批量关键词匹配
- */
 function preg_implode_check($keywords, $text) {
     foreach ($keywords as $word) {
         if (stripos($text, $word) !== false) return true;
@@ -243,7 +282,6 @@ function preg_implode_check($keywords, $text) {
  * 核心 WHOIS 文本解析器
  */
 function parse_whois_text($raw, $suffix) {
-    // 匹配规则配置
     $registrar_patterns = [
         '/Registrar:\s*(.*)/i',
         '/Sponsoring Registrar:\s*(.*)/i',
@@ -265,7 +303,6 @@ function parse_whois_text($raw, $suffix) {
         '/Expiry Date:\s*(.*)/i'
     ];
     
-    // 前端要求 domain_status 传的是数组或带分隔的内容，此处提取原始文本
     $status_patterns = [
         '/Domain Status:\s*([^\s\r\n]*)/i',
         '/Status:\s*([^\s\r\n]*)/i'
@@ -279,7 +316,6 @@ function parse_whois_text($raw, $suffix) {
     $registrant_patterns = ['/Registrant Name:\s*(.*)/i', '/Registrant:\s*(.*)/i'];
     $email_patterns = ['/Registrant Contact Email:\s*(.*)/i', '/Registrant Email:\s*(.*)/i'];
 
-    // 提取纯文本
     $creation_time = match_field($creation_patterns, $raw);
     $expiration_time = match_field($expiration_patterns, $raw);
     $registrar_name = match_field($registrar_patterns, $raw);
@@ -289,7 +325,6 @@ function parse_whois_text($raw, $suffix) {
     
     $ns_array = match_field_multi($ns_patterns, $raw);
     
-    // 规范化时间格式 (仅抽取出前段 YYYY-MM-DD，防非标时区字符干扰)
     if (!empty($creation_time)) {
         $date_part = explode('T', $creation_time)[0];
         $time_stamp = strtotime($date_part);
@@ -301,7 +336,6 @@ function parse_whois_text($raw, $suffix) {
         $expiration_time = $time_stamp ? date('Y-m-d H:i:s', $time_stamp) : "";
     }
     
-    // 过滤各种注册保护下的无效隐私信息
     if (preg_implode_check(['REDACTED', 'Privacy', 'WhoisGuard', 'SuperPrivacy', 'Protected', 'grs-whois'], $registrant_name)) {
         $registrant_name = "";
     }
@@ -313,8 +347,8 @@ function parse_whois_text($raw, $suffix) {
         'registrar_name'  => $registrar_name ?: "",
         'creation_time'   => $creation_time ?: "",
         'expiration_time' => $expiration_time ?: "",
-        'domain_status'   => $domain_status ? [$domain_status] : ["ok"], // 包装成数组符合前端格式
-        'name_server'     => !empty($ns_array) ? array_unique(array_filter($ns_array)) : [], // 数组格式对齐前端
+        'domain_status'   => $domain_status ? [$domain_status] : ["ok"], 
+        'name_server'     => !empty($ns_array) ? array_unique(array_filter($ns_array)) : [], 
         'registrant_name' => $registrant_name ?: "",
         'registrant_email'=> $registrant_email ?: ""
     ];
