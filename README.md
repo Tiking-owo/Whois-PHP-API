@@ -4,7 +4,7 @@
 **数据来源于公开Whois信息，仅供参考。**
 
 ## 版本信息
-- **当前版本**：v1.0.0 稳定版
+- **当前版本**：v1.0.1 测试版
 ## 接口基本信息
 #### 前端示例：[https://whois.tiking.top/](https://whois.tiking.top/)
 #### 接口文档：[https://whois.tiking.top/docs](https://whois.tiking.top/docs)
@@ -83,6 +83,32 @@ Apache:
 <IfModule mod_rewrite.c>
     RewriteEngine On
     RewriteRule ^whois/v1/?$ whois/whois.php [QSA,L]
+```
+
+### 3.配置缓存清理计划任务
+#### 方案一 终端命令行添加:
+```bash
+crontab -e
+```
+移到文件最底部，粘贴以下两行配置（它代表每 10 分钟执行一次，自动查找并删除 /tmp/whois_cache/ 和 /tmp/whois_limit/ 下修改时间超过 5 分钟的文件）：
+```plaintext
+*/10 * * * * find /tmp/whois_cache/ -type f -mmin +5 -delete >/dev/null 2>&1
+*/10 * * * * find /tmp/whois_limit/ -type f -mmin +5 -delete >/dev/null 2>&1
+```
+#### 方案二 宝塔面板添加:
+点击左侧菜单的 「计划任务」。
+
+按照以下参数新建一个任务：
+```
+任务类型：Shell 脚本
+任务名称：清理 WHOIS 缓存与限流文件
+执行周期：N分钟 —— 设置为 10 分钟
+```
+脚本内容：把下面的命令完整复制进去：
+```bash
+#!/bin/bash
+find /tmp/whois_cache/ -type f -mmin +5 -delete
+find /tmp/whois_limit/ -type f -mmin +5 -delete
 ```
 ## 开源协议
 本项目基于 MIT License 协议开源
